@@ -12,10 +12,10 @@ for fid in treebank.fileids():
     parsed_sents = treebank.parsed_sents(fid)
     for i, tree in enumerate(parsed_sents):
 
-        f = open(f"./penn_treebank_subset/{fid.split('.')[0]}-sentence-{i}", 'w')
-
         n_subtrees = tree.subtrees(lambda t: t.height() == 5)
-        for st in n_subtrees:
+        for j, st in enumerate(n_subtrees):
+            f = open(f"./penn_treebank_subset/{fid.split('.')[0]}-sentence-{i}-subtree-{j}", 'w')
+
             stk = deque()
             stk.append((st, 0))
             while len(stk) > 0:
@@ -24,5 +24,5 @@ for fid in treebank.fileids():
                 for st in reversed(t):
                     if type(st) == Tree:
                         stk.append((st, depth+1))
-        
-        f.close()
+
+            f.close()
