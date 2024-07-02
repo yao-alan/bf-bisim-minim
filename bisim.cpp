@@ -29,6 +29,7 @@ typedef struct Block
     std::unordered_map<int, State *> states;
 
     Block(int id) : id(id) {}
+    int size(void) { return states.size(); }
 } Block;
 
 typedef struct Node
@@ -154,17 +155,56 @@ class ObsQ
         std::unordered_map<std::string, CountLL *> m_f_to_countll;
 };
 
-void split(Automaton *a, std::vector<Block *> *r, ObsQ::CountLL *cll_node) {
+class Composite
+{
+    public:
+        Composite(std::vector<Block *> *p) : p(p) {}
+
+        void split(std::vector<Block *> *r, std::vector<int> *altered) {
+            for (int block_id : *altered) {
+                // id of p_block from which r_split is derived
+                int p_id = (r->at(block_id)->states).begin()->second->p_block->id;
+                m_parent_to_split[p_id][block_id] = r->at(block_id);
+                if (m_parent_to_split[p_id].size() >= 2) {
+                    m_two_or_more_splits.insert(p_id);
+                }
+            }
+        }
+
+        // returns S_i, B_i s.t. B_i \subset S_i and |B_i| <= |S_i|/2
+        std::pair<Block *, Block *> select(void) {
+            if (!m_two_or_more_splits.size()) {
+                return std::make_pair(nullptr, nullptr);
+            }
+            int p_id = *(m_two_or_more_splits.begin());
+            int sz_1 = m_parent_to_split[p_id].begin()->second->size();
+            int sz_2 = (std::next(m_parent_to_split[p_id].begin(), 1))->second->size();
+            if (sz_1 <= sz_2) {
+                return std::make_pair(p->at(p_id), m_parent_to_split[p_id].begin()->second);
+            } else {
+                return std::make_pair(p->at(p_id), std::next(m_parent_to_split[p_id].begin(), 1)->second);
+            }
+        }
+
+    private:
+        std::vector<Block *> *p;
+        std::unordered_map<int, std::unordered_map<int, Block *>> m_parent_to_split;
+        std::unordered_set<int> m_two_or_more_splits;
+};
+
+void split(Automaton *a, Composite *c, std::vector<Block *> *r, ObsQ::CountLL *cll_node) {
     for (std::pair<const int, ObsQ::CountLL *> &e : cll_node->next_block) {
-        split(a, r, e.second);
+        split(a, c, r, e.second);
     }
     // move all elements from transitions_into_q into new blocks
+    std::vector<int> altered;
     std::unordered_map<int, std::vector<Block *>::iterator> visited_blocks;
     for (std::pair<const int, int> &state_id_and_count : cll_node->transitions_into_q) {
         int state_id = state_id_and_count.first;
         int block_id = a->m_states[state_id]->r_block->id;
 
         if (!visited_blocks.count(block_id)) {
+            altered.push_back(r->size());
             r->push_back(new Block(r->size()));
             visited_blocks[block_id] = r->end() - 1;
         }
@@ -173,12 +213,14 @@ void split(Automaton *a, std::vector<Block *> *r, ObsQ::CountLL *cll_node) {
         State *s = a->m_states[state_id];
         s->r_block->states.erase(state_id);
         if (s->r_block->states.empty()) { // all elements now moved out
+            altered[altered.size()-1] = s->r_block->id;
             r->at(s->r_block->id) = r->back();
             r->erase(r->end() - 1);
         }
         s->r_block = *(visited_blocks[block_id]);
         (*(visited_blocks[block_id]))->states[state_id] = s;
     }
+    c->split(r, &altered);
 }
 
 void summarize(std::vector<Block *> &relation) {
@@ -207,16 +249,27 @@ Automaton *back_minim(Automaton *a) {
         r[0]->states[s->id] = s;
     }
 
+    Composite c(&p);
+
     // R_0 := R_0 \ split(L_0)
     ObsQ r0_obsq(a, &r, p[0]);
     for (std::pair<const std::string, ObsQ::CountLL *> &e : r0_obsq.m_f_to_countll) {
-        split(a, &r, e.second);
+        split(a, &c, &r, e.second);
     }
 
     std::cout << "P:" << std::endl;
     summarize(p);
     std::cout << "R:" << std::endl;
     summarize(r);
+
+    std::pair<Block *, Block *> si_bi = c.select();
+    std::vector<Block *> s_i, b_i;
+    s_i.push_back(si_bi.first);
+    b_i.push_back(si_bi.second);
+    std::cout << "S_0:" << std::endl;
+    summarize(s_i);
+    std::cout << "B_0:" << std::endl;
+    summarize(b_i);
 
     return a;
 }
