@@ -1,0 +1,11 @@
+NP-SBJ
+	NP
+		NNP
+		NNP
+	,
+	ADJP
+		NP
+			CD
+			NNS
+		JJ
+	,

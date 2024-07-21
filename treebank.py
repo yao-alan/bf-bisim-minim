@@ -7,6 +7,8 @@ from collections import deque
 if not exists("./penn_treebank_subset"):
     mkdir("./penn_treebank_subset")
 
+k = 0
+
 for fid in treebank.fileids():
 
     parsed_sents = treebank.parsed_sents(fid)
@@ -14,7 +16,11 @@ for fid in treebank.fileids():
 
         n_subtrees = tree.subtrees(lambda t: t.height() == 5)
         for j, st in enumerate(n_subtrees):
-            f = open(f"./penn_treebank_subset/{fid.split('.')[0]}-sentence-{i}-subtree-{j}", 'w')
+
+            if k == 100:
+                exit()
+
+            f = open(f"./other_tests_2/{fid.split('.')[0]}-sentence-{i}-subtree-{j}", 'w')
 
             stk = deque()
             stk.append((st, 0))
@@ -26,3 +32,5 @@ for fid in treebank.fileids():
                         stk.append((st, depth+1))
 
             f.close()
+
+            k += 1

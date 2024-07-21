@@ -9,6 +9,7 @@
 #include <tuple>
 #include <unordered_set>
 #include <unordered_map>
+#include <numeric>
 
 struct Block;
 
@@ -67,19 +68,23 @@ class Automaton
                 m_transition_table.push_back(make_tuple(
                     tree->name, std::vector<State *>{}, m_states[state_id]
                 ));
-                m_states[state_id]->in_transition.insert(m_transition_table.size()-1);
+                // m_states[state_id]->in_transition.insert(m_transition_table.size()-1);
                 return m_states[state_id];
             }
             std::vector<State *> q_i;
+            std::vector<State *> child_states;
             for (Node *child : tree->children) {
-                q_i.push_back(add(child));
+                child_states.push_back(add(child));
+                q_i.push_back(child_states.back());
             }
             int state_id = m_states.size();
             m_states[state_id] = new State(state_id);
             m_transition_table.push_back(make_tuple(
                 tree->name, q_i, m_states[state_id]
             ));
-            m_states[state_id]->in_transition.insert(m_transition_table.size()-1);
+            for (State *cs : child_states) {
+                cs->in_transition.insert(m_transition_table.size()-1);
+            }
             return m_states[state_id];
         }
 
@@ -104,38 +109,58 @@ class ObsQ
 {
     public:
         // L_i(B) = relation(b)
-        ObsQ(Automaton *a, std::vector<Block *> *relation, Block *b) {
-            // only search for transitions with states included in b
-            std::unordered_set<int> visited;
-            for (std::pair<const int, State *> &e : b->states) {
-                State *s = e.second;
-                for (int i : s->in_transition) {
-                    if (visited.count(i)) {
-                        continue;
+        ObsQ(Automaton *a, std::vector<Block *> *relation, Block *b = nullptr, Block *not_b = nullptr) {
+            // all transition_table indices containing a state in not_b
+            std::unordered_set<int> transitions_in_not_b;
+            if (not_b != nullptr) {
+                for (std::pair<const int, State *> &e : not_b->states) {
+                    for (const int &i : e.second->in_transition) {
+                        transitions_in_not_b.insert(i);
                     }
-                    std::string f = std::get<0>((a->m_transition_table)[i]);
-                    std::vector<State *> q1r = std::get<1>((a->m_transition_table)[i]);
-                    State *q = std::get<2>((a->m_transition_table)[i]);
-
-                    if (!m_f_to_countll.count(f)) {
-                        m_f_to_countll[f] = new CountLL();
-                    }
-                    CountLL *ptr = m_f_to_countll[f];
-
-                    for (State *qk : q1r) {
-                        if (!(ptr->next_block.count(qk->r_block->id))) {
-                            ptr->next_block[qk->r_block->id] = new CountLL();
-                        }
-                        ptr = ptr->next_block[qk->r_block->id];
-                    }
-
-                    if (!(ptr->transitions_into_q.count(q->id))) {
-                        ptr->transitions_into_q[q->id] = 0;
-                    }
-                    ptr->transitions_into_q[q->id]++;
-
-                    visited.insert(i);
                 }
+            }
+
+            // if b == nullptr, then language is L0 and we include all indices in transition table
+            // otherwise, only consider transitions where some argument is a state in b (and is not in not_b)
+            std::vector<int> relevant_transitions;
+            if (b == nullptr) {
+                relevant_transitions.resize(a->m_transition_table.size());
+                std::iota(relevant_transitions.begin(), relevant_transitions.end(), 0);
+            } else {
+                std::unordered_set<int> visited;
+                for (std::pair<const int, State *> &e : b->states) {
+                    State *s = e.second;
+                    for (int i : s->in_transition) {
+                        if (visited.count(i) || transitions_in_not_b.count(i)) {
+                            continue;
+                        }
+                        relevant_transitions.push_back(i);
+                        visited.insert(i);
+                    }
+                }
+            }
+
+            for (int i : relevant_transitions) {
+                std::string f = std::get<0>((a->m_transition_table)[i]);
+                std::vector<State *> q1r = std::get<1>((a->m_transition_table)[i]);
+                State *q = std::get<2>((a->m_transition_table)[i]);
+
+                if (!m_f_to_countll.count(f)) {
+                    m_f_to_countll[f] = new CountLL();
+                }
+                CountLL *ptr = m_f_to_countll[f];
+
+                for (State *qk : q1r) {
+                    if (!(ptr->next_block.count(qk->r_block->id))) {
+                        ptr->next_block[qk->r_block->id] = new CountLL();
+                    }
+                    ptr = ptr->next_block[qk->r_block->id];
+                }
+
+                if (!(ptr->transitions_into_q.count(q->id))) {
+                    ptr->transitions_into_q[q->id] = 0;
+                }
+                ptr->transitions_into_q[q->id]++;
             }
         }
 
@@ -158,17 +183,29 @@ class ObsQ
 class Composite
 {
     public:
-        Composite(std::vector<Block *> *p) : p(p) {}
+        Composite(std::vector<Block *> *p, std::vector<Block *> *r) : p(p), r(r) {}
 
         void split(std::vector<Block *> *r, std::vector<int> *altered) {
             for (int block_id : *altered) {
                 // id of p_block from which r_split is derived
                 int p_id = (r->at(block_id)->states).begin()->second->p_block->id;
-                m_parent_to_split[p_id][block_id] = r->at(block_id);
+                m_parent_to_split[p_id].insert(block_id);
+                m_split_to_parent[block_id] = p_id;
                 if (m_parent_to_split[p_id].size() >= 2) {
                     m_two_or_more_splits.insert(p_id);
                 }
             }
+        }
+
+        void cut(std::vector<Block *> *p, Block *b) {
+            // m_parent_to_split[p->back()->id][b->id] = b;
+            int bp_id = m_split_to_parent[b->id];
+            m_parent_to_split[bp_id].erase(b->id);
+            if (m_parent_to_split[bp_id].size() < 2) {
+                m_two_or_more_splits.erase(bp_id);
+            }
+            m_parent_to_split[p->back()->id].insert(b->id);
+            m_split_to_parent[b->id] = p->back()->id;
         }
 
         // returns S_i, B_i s.t. B_i \subset S_i and |B_i| <= |S_i|/2
@@ -177,20 +214,33 @@ class Composite
                 return std::make_pair(nullptr, nullptr);
             }
             int p_id = *(m_two_or_more_splits.begin());
-            int sz_1 = m_parent_to_split[p_id].begin()->second->size();
-            int sz_2 = (std::next(m_parent_to_split[p_id].begin(), 1))->second->size();
+            int sz_1 = r->at(*(m_parent_to_split[p_id].begin()))->size();
+            int sz_2 = r->at(*std::next((m_parent_to_split[p_id].begin()), 1))->size();
             if (sz_1 <= sz_2) {
-                return std::make_pair(p->at(p_id), m_parent_to_split[p_id].begin()->second);
+                return std::make_pair(p->at(p_id), r->at(*(m_parent_to_split[p_id].begin())));
             } else {
-                return std::make_pair(p->at(p_id), std::next(m_parent_to_split[p_id].begin(), 1)->second);
+                return std::make_pair(p->at(p_id), r->at(*std::next((m_parent_to_split[p_id].begin()), 1)));
             }
         }
 
     private:
         std::vector<Block *> *p;
-        std::unordered_map<int, std::unordered_map<int, Block *>> m_parent_to_split;
+        std::vector<Block *> *r;
+        // split in r, parent in p
+        std::unordered_map<int, std::unordered_set<int>> m_parent_to_split;
+        std::unordered_map<int, int> m_split_to_parent;
         std::unordered_set<int> m_two_or_more_splits;
 };
+
+void cut(Composite *c, std::vector<Block *> *p, Block *b) {
+    p->push_back(new Block(p->size()));
+    for (std::pair<const int, State *> &s : b->states) {
+        (p->back()->states)[s.second->id] = s.second;
+        p->at(s.second->p_block->id)->states.erase(s.second->id);
+        s.second->p_block = p->back();
+    }
+    c->cut(p, b);
+}
 
 void split(Automaton *a, Composite *c, std::vector<Block *> *r, ObsQ::CountLL *cll_node) {
     for (std::pair<const int, ObsQ::CountLL *> &e : cll_node->next_block) {
@@ -213,7 +263,9 @@ void split(Automaton *a, Composite *c, std::vector<Block *> *r, ObsQ::CountLL *c
         State *s = a->m_states[state_id];
         s->r_block->states.erase(state_id);
         if (s->r_block->states.empty()) { // all elements now moved out
-            altered[altered.size()-1] = s->r_block->id;
+            // swap newly added block with empty block
+            altered.back() = s->r_block->id;
+            r->back()->id = s->r_block->id;
             r->at(s->r_block->id) = r->back();
             r->erase(r->end() - 1);
         }
@@ -249,27 +301,52 @@ Automaton *back_minim(Automaton *a) {
         r[0]->states[s->id] = s;
     }
 
-    Composite c(&p);
+    Composite c(&p, &r);
 
     // R_0 := R_0 \ split(L_0)
-    ObsQ r0_obsq(a, &r, p[0]);
+    ObsQ r0_obsq(a, &r, nullptr);
     for (std::pair<const std::string, ObsQ::CountLL *> &e : r0_obsq.m_f_to_countll) {
         split(a, &c, &r, e.second);
     }
 
-    std::cout << "P:" << std::endl;
+    std::cout << "P0:" << std::endl;
     summarize(p);
-    std::cout << "R:" << std::endl;
+    std::cout << "R0:" << std::endl;
     summarize(r);
 
+    int i = 1; 
     std::pair<Block *, Block *> si_bi = c.select();
-    std::vector<Block *> s_i, b_i;
-    s_i.push_back(si_bi.first);
-    b_i.push_back(si_bi.second);
-    std::cout << "S_0:" << std::endl;
-    summarize(s_i);
-    std::cout << "B_0:" << std::endl;
-    summarize(b_i);
+    while (si_bi.first != nullptr && si_bi.second != nullptr) {
+        cut(&c, &p, si_bi.second);
+        si_bi.second = p.back();
+        // R_i \ split(L_{i+1}(B_i))
+        ObsQ ri_obsq_bi(a, &r, si_bi.second);
+        for (std::pair<const std::string, ObsQ::CountLL *> &e : ri_obsq_bi.m_f_to_countll) {
+            split(a, &c, &r, e.second);
+        }
+
+        
+        std::cout << "P" << i << ":" << std::endl;
+        summarize(p);
+        /*
+        std::cout << "R" << i-1 << " \\ split:" << std::endl;
+        summarize(r);
+        */
+        
+
+        // std::cout << si_bi.first << " " << si_bi.second << std::endl;
+        ObsQ ri_obsq_si_bi(a, &r, si_bi.first, si_bi.second);
+        for (std::pair<const std::string, ObsQ::CountLL *> &e : ri_obsq_si_bi.m_f_to_countll) {
+            split(a, &c, &r, e.second);
+        }
+
+        std::cout << "R" << i << ":" << std::endl;
+        summarize(r);
+
+        si_bi = c.select();
+
+        i++;
+    }
 
     return a;
 }
@@ -281,10 +358,13 @@ std::pair<Automaton *, std::unordered_map<int, std::vector<int>>> forward_minim(
 
 int main()
 {
+    freopen("test.out", "w", stdout);
+
+
     Automaton automaton;
 
     // parse file and add trees to Automaton
-    for (const auto &entry : std::filesystem::directory_iterator("other_tests")) {
+    for (const auto &entry : std::filesystem::directory_iterator("other_tests_2")) {
         std::ifstream pos_file;
         pos_file.open(entry.path());
 
