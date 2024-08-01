@@ -1,6 +1,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <list>
 #include <stack>
@@ -11,341 +12,330 @@
 #include <unordered_map>
 #include <numeric>
 
-struct Block;
+using State = int;
+using Block = int;
 
-typedef struct State
+class Node
 {
-    int id;
-    Block *p_block;
-    Block *r_block;
-    // indices of transitions in m_transition_table that include state
-    std::unordered_set<int> in_transition;
+    public:
+        std::string name;
+        int depth;
+        std::vector<Node *> children;
 
-    State(int id) : id(id) {}
-} State;
-
-typedef struct Block
-{
-    int id;
-    std::unordered_map<int, State *> states;
-
-    Block(int id) : id(id) {}
-    int size(void) { return states.size(); }
-} Block;
-
-typedef struct Node
-{
-    std::string name;
-    int depth;
-    std::vector<Node *> children;
-
-    Node(std::string name, int depth) {
-        this->name = name;
-        this->depth = depth;
-    }
-} Node;
-
-void print_tree(Node *node, int depth=0) {
-    if (node == nullptr) return;
-    std::cout << std::string(depth, '\t') << node->name << std::endl;
-    if ((node->children).size()) {
-        for (Node *child : node->children) {
-            print_tree(child, depth+1);
+        Node(std::string name, int depth) {
+            this->name = name;
+            this->depth = depth;
         }
-    }
-}
+
+        static void print_tree(Node *node, int depth = 0) {
+            if (node == nullptr) return;
+            std::cout << std::string(depth, '\t') << node->name << std::endl;
+            if ((node->children).size()) {
+                for (Node *child : node->children) {
+                    print_tree(child, depth+1);
+                }
+            }
+        }
+};
 
 class Automaton
 {
     public:
-        Automaton() {}
+        Automaton(void) { n_states = 0; }
 
-        State *add(Node *tree) {
+        State add(Node *tree) {
             // f () -> q
             if ((tree->children).size() == 0) {
-                int state_id = m_states.size();
-                m_states[state_id] = new State(state_id);
-                m_transition_table.push_back(make_tuple(
-                    tree->name, std::vector<State *>{}, m_states[state_id]
-                ));
-                // m_states[state_id]->in_transition.insert(m_transition_table.size()-1);
-                return m_states[state_id];
+                transition_table.push_back(make_tuple(tree->name, std::vector<State>{}, n_states));
+            } else {
+                std::vector<State> q1r;
+                for (Node *child : tree->children) {
+                    q1r.push_back(add(child));
+                }
+                transition_table.push_back(make_tuple(tree->name, q1r, n_states));
+                for (State qk : q1r) {
+                    transitions_containing_state[qk].insert(transition_table.size()-1);
+                }
             }
-            std::vector<State *> q_i;
-            std::vector<State *> child_states;
-            for (Node *child : tree->children) {
-                child_states.push_back(add(child));
-                q_i.push_back(child_states.back());
-            }
-            int state_id = m_states.size();
-            m_states[state_id] = new State(state_id);
-            m_transition_table.push_back(make_tuple(
-                tree->name, q_i, m_states[state_id]
-            ));
-            for (State *cs : child_states) {
-                cs->in_transition.insert(m_transition_table.size()-1);
-            }
-            return m_states[state_id];
+            return n_states++;
         }
 
         void summarize(void) {
             // print current transition rules
             std::cout << "Transitions:" << std::endl;
-            for (std::tuple<std::string, std::vector<State *>, State *> t : m_transition_table) {
+            for (std::tuple<std::string, std::vector<State>, State> t : transition_table) {
                 std::cout << std::get<0>(t) << " ( ";
-                for (State *s : std::get<1>(t)) {
-                    std::cout << s->id << " ";
+                for (State s : std::get<1>(t)) {
+                    std::cout << s << " ";
                 }
-                std::cout << ") -> " << std::get<2>(t)->id << std::endl;
+                std::cout << ") -> " << std::get<2>(t) << std::endl;
             }
         }
 
         // f (q_1, ..., q_r) -> q
-        std::vector<std::tuple<std::string, std::vector<State *>, State *>> m_transition_table;
-        std::unordered_map<int, State *> m_states;
+        std::vector<std::tuple<std::string, std::vector<State>, State>> transition_table;
+        std::unordered_map<State, std::unordered_set<int>> transitions_containing_state;
+        int n_states;
+};
+
+class Relation
+{
+    public:
+        Relation(int n_states) {
+            for (int i = 0; i < n_states; ++i) {
+                block_of_state[i] = 0;
+                states_of_block[0].insert(i);
+            }
+        }
+
+        const Block block_of(State s) {
+            return block_of_state[s];
+        }
+        const std::unordered_set<State> &states_of(Block b) {
+            return states_of_block[b];
+        }
+
+        // returns newly created blocks
+        std::unique_ptr<std::unordered_map<Block, Block>> separate(const std::unordered_set<State> &states) {
+            std::unique_ptr<std::unordered_map<Block, Block>> parent = std::unique_ptr<std::unordered_map<Block, Block>>{new std::unordered_map<Block, Block>()};
+            std::unordered_map<Block, Block> seen; // old block of state -> new block for state
+            for (State s : states) {
+                Block old = block_of_state[s];
+                states_of_block[old].erase(s);
+                if (seen.count(old)) {
+                    move(s, old, seen[old]);
+                } else {
+                    Block nu = states_of_block.size();
+                    parent->insert(std::make_pair(nu, old));
+                    seen[old] = nu;
+                    move(s, old, states_of_block.size());
+                }
+                // if removed all states from states_of_block[old], move states w/ highest block id back
+                if (!states_of_block[old].size()) {
+                    seen.erase(old);
+                    Block highest = states_of_block.size() - 1;
+                    while (states_of_block[highest].size()) {
+                        State s = *(states_of_block[highest].begin());
+                        move(s, highest, old);
+                    }
+                    parent->insert(std::make_pair(old, parent->at(highest)));
+                    parent->erase(highest);
+                    states_of_block.erase(highest);
+                }
+            }
+            return parent;
+        }
+
+        void summarize(void) {
+            for (int i = 0; i < states_of_block.size(); ++i) {
+                std::cout << "[ ";
+                for (const int &s : states_of_block[i]) {
+                    std::cout << s << " ";
+                }
+                std::cout << "]" << std::endl;
+            }
+        }
+
+    private:
+        void move(State s, Block old, Block nu) {
+            states_of_block[old].erase(s);
+            states_of_block[nu].insert(s);
+            block_of_state[s] = nu;
+        }
+
+        std::unordered_map<State, Block> block_of_state;
+        std::unordered_map<Block, std::unordered_set<State>> states_of_block;
 };
 
 class ObsQ
 {
     public:
-        // L_i(B) = relation(b)
-        ObsQ(Automaton *a, std::vector<Block *> *relation, Block *b = nullptr, Block *not_b = nullptr) {
-            // all transition_table indices containing a state in not_b
+        // both b and not_b are in p
+        ObsQ(Automaton *a, Relation *p, Block b = -1, Block not_b = -1) {
+            // all transition_table indices containing a state in not_b; O(r|delta|)
             std::unordered_set<int> transitions_in_not_b;
-            if (not_b != nullptr) {
-                for (std::pair<const int, State *> &e : not_b->states) {
-                    for (const int &i : e.second->in_transition) {
+            if (not_b != -1) {
+                for (const State &s : p->states_of(not_b)) {
+                    for (const int &i : a->transitions_containing_state[s]) {
                         transitions_in_not_b.insert(i);
                     }
                 }
             }
-
-            // if b == nullptr, then language is L0 and we include all indices in transition table
+            // if b == -1, then language is L0 and we include all indices in transition table
             // otherwise, only consider transitions where some argument is a state in b (and is not in not_b)
-            std::vector<int> relevant_transitions;
-            if (b == nullptr) {
-                relevant_transitions.resize(a->m_transition_table.size());
-                std::iota(relevant_transitions.begin(), relevant_transitions.end(), 0);
+            std::unordered_set<int> relevant_transitions;
+            if (b == -1) {
+                for (int i = 0; i < a->transition_table.size(); ++i) {
+                    relevant_transitions.insert(i);
+                }
             } else {
-                std::unordered_set<int> visited;
-                for (std::pair<const int, State *> &e : b->states) {
-                    State *s = e.second;
-                    for (int i : s->in_transition) {
-                        if (visited.count(i) || transitions_in_not_b.count(i)) {
-                            continue;
+                for (const State &s : p->states_of(b)) {
+                    for (const int &i : a->transitions_containing_state[s]) {
+                        if (!transitions_in_not_b.count(i)) {
+                            relevant_transitions.insert(i);
                         }
-                        relevant_transitions.push_back(i);
-                        visited.insert(i);
                     }
                 }
             }
 
             for (int i : relevant_transitions) {
-                std::string f = std::get<0>((a->m_transition_table)[i]);
-                std::vector<State *> q1r = std::get<1>((a->m_transition_table)[i]);
-                State *q = std::get<2>((a->m_transition_table)[i]);
+                std::string f = std::get<0>((a->transition_table)[i]);
+                std::vector<State> q1r = std::get<1>((a->transition_table)[i]);
+                State q = std::get<2>((a->transition_table)[i]);
 
-                if (!m_f_to_countll.count(f)) {
-                    m_f_to_countll[f] = new CountLL();
+                if (!f_to_qnodes.count(f)) {
+                    f_to_qnodes[f] = new ObsQNode();
                 }
-                CountLL *ptr = m_f_to_countll[f];
+                ObsQNode *ptr = f_to_qnodes[f];
 
-                for (State *qk : q1r) {
-                    if (!(ptr->next_block.count(qk->r_block->id))) {
-                        ptr->next_block[qk->r_block->id] = new CountLL();
+                for (State qk : q1r) {
+                    Block following = p->block_of(qk);
+                    if (!ptr->next_block.count(following)) {
+                        ptr->next_block[following] = new ObsQNode();
                     }
-                    ptr = ptr->next_block[qk->r_block->id];
+                    ptr = ptr->next_block[following];
                 }
 
-                if (!(ptr->transitions_into_q.count(q->id))) {
-                    ptr->transitions_into_q[q->id] = 0;
-                }
-                ptr->transitions_into_q[q->id]++;
+                ptr->transitions_into.insert(q);
             }
         }
 
-        std::unordered_map<int, int> *obs(std::pair<std::string, std::vector<State *>> w) {
-            CountLL *ptr = m_f_to_countll[w.first];
-            for (State *s : w.second) {
-                ptr = ptr->next_block[s->r_block->id];
-            }
-            return &(ptr->transitions_into_q);
-        }
+        typedef struct ObsQNode {
+            std::unordered_map<Block, ObsQNode *> next_block;
+            std::unordered_set<State> transitions_into;
+            // std::unordered_map<State, int> transitions_into; // (state_id of q, count)
+        } ObsQNode;
 
-        typedef struct CountLL {
-            std::unordered_map<int, CountLL *> next_block;
-            std::unordered_map<int, int> transitions_into_q; // (state_id of q, count)
-        } CountLL;
-
-        std::unordered_map<std::string, CountLL *> m_f_to_countll;
+        std::unordered_map<std::string, ObsQNode *> f_to_qnodes;
 };
 
-class Composite
+class BlockSelector
 {
     public:
-        Composite(std::vector<Block *> *p, std::vector<Block *> *r) : p(p), r(r) {}
+        BlockSelector() {
+            p_parent_of_r_block[0] = 0;
+        }
 
-        void split(std::vector<Block *> *r, std::vector<int> *altered) {
-            for (int block_id : *altered) {
-                // id of p_block from which r_split is derived
-                int p_id = (r->at(block_id)->states).begin()->second->p_block->id;
-                m_parent_to_split[p_id].insert(block_id);
-                m_split_to_parent[block_id] = p_id;
-                if (m_parent_to_split[p_id].size() >= 2) {
-                    m_two_or_more_splits.insert(p_id);
+        void p_cut(std::unique_ptr<std::unordered_map<Block, Block>> p_parent_child, Block r_b) {
+            Block p_child = p_parent_child->begin()->first;
+            Block p_parent = p_parent_child->begin()->second;
+
+            r_children_of_p_block[p_parent].erase(r_b);
+            if (r_children_of_p_block[p_parent].size() < 2) {
+                p_parents_with_two_children.erase(p_parent);
+            }
+            p_parent_of_r_block[r_b] = p_child;
+        }
+
+        void r_split(std::unique_ptr<std::unordered_map<Block, Block>> r_parent_child) {
+            for (std::pair<const Block, Block> &e : *r_parent_child) {
+                Block r_child = e.first;
+                Block r_parent = e.second;
+
+                // if r_child newly created, obviously not in p_parent_of_r_block
+                // otherwise, implies r_child was emptied and then swapped; remove old history
+                Block p_parent;
+                if (p_parent_of_r_block.count(r_child)) {
+                    p_parent = p_parent_of_r_block[r_child];
+                    r_children_of_p_block[p_parent].erase(r_child);
+                    if (r_children_of_p_block[p_parent].size() < 2) {
+                        p_parents_with_two_children.erase(p_parent);
+                    }
+                }
+                p_parent_of_r_block[r_child] = p_parent = p_parent_of_r_block[r_parent];
+                r_children_of_p_block[p_parent].insert(r_child);
+                if (r_children_of_p_block[p_parent].size() >= 2) {
+                    p_parents_with_two_children.insert(p_parent);
                 }
             }
         }
 
-        void cut(std::vector<Block *> *p, Block *b) {
-            // m_parent_to_split[p->back()->id][b->id] = b;
-            int bp_id = m_split_to_parent[b->id];
-            m_parent_to_split[bp_id].erase(b->id);
-            if (m_parent_to_split[bp_id].size() < 2) {
-                m_two_or_more_splits.erase(bp_id);
+        std::pair<Block, Block> select(Relation *p, Relation *r) {
+            if (!p_parents_with_two_children.size()) {
+                return std::make_pair(-1, -1);
             }
-            m_parent_to_split[p->back()->id].insert(b->id);
-            m_split_to_parent[b->id] = p->back()->id;
-        }
-
-        // returns S_i, B_i s.t. B_i \subset S_i and |B_i| <= |S_i|/2
-        std::pair<Block *, Block *> select(void) {
-            if (!m_two_or_more_splits.size()) {
-                return std::make_pair(nullptr, nullptr);
-            }
-            int p_id = *(m_two_or_more_splits.begin());
-            int sz_1 = r->at(*(m_parent_to_split[p_id].begin()))->size();
-            int sz_2 = r->at(*std::next((m_parent_to_split[p_id].begin()), 1))->size();
-            if (sz_1 <= sz_2) {
-                return std::make_pair(p->at(p_id), r->at(*(m_parent_to_split[p_id].begin())));
+            Block pb = *(p_parents_with_two_children.begin());
+            std::unordered_set<Block> rc = r_children_of_p_block[pb];
+            Block rb1 = *(rc.begin());
+            Block rb2 = *(std::next(rc.begin(), 1));
+            Block sz1 = r->states_of(rb1).size();
+            Block sz2 = r->states_of(rb2).size();
+            if (sz1 <= sz2) {
+                return std::make_pair(pb, rb1);
             } else {
-                return std::make_pair(p->at(p_id), r->at(*std::next((m_parent_to_split[p_id].begin()), 1)));
+                return std::make_pair(pb, rb2);
             }
+        }
+    
+    private:
+        std::unordered_map<Block, std::unordered_set<Block>> r_children_of_p_block;
+        std::unordered_map<Block, Block> p_parent_of_r_block;
+        std::unordered_set<Block> p_parents_with_two_children;
+};
+
+class PRelation : public Relation
+{
+    public:
+        PRelation(BlockSelector *bs, int n_states) : bs(bs), Relation(n_states) {}
+
+        // P_i\cut(B_i) for B_i in (Q/R_i)
+        void cut(Relation *r, Block b) {
+            bs->p_cut(separate(r->states_of(b)), b);
         }
 
     private:
-        std::vector<Block *> *p;
-        std::vector<Block *> *r;
-        // split in r, parent in p
-        std::unordered_map<int, std::unordered_set<int>> m_parent_to_split;
-        std::unordered_map<int, int> m_split_to_parent;
-        std::unordered_set<int> m_two_or_more_splits;
+        BlockSelector *bs;
 };
 
-void cut(Composite *c, std::vector<Block *> *p, Block *b) {
-    p->push_back(new Block(p->size()));
-    for (std::pair<const int, State *> &s : b->states) {
-        (p->back()->states)[s.second->id] = s.second;
-        p->at(s.second->p_block->id)->states.erase(s.second->id);
-        s.second->p_block = p->back();
-    }
-    c->cut(p, b);
-}
+class RRelation : public Relation
+{
+    public:
+        RRelation(BlockSelector *bs, int n_states) : bs(bs), Relation(n_states) {}
 
-void split(Automaton *a, Composite *c, std::vector<Block *> *r, ObsQ::CountLL *cll_node) {
-    for (std::pair<const int, ObsQ::CountLL *> &e : cll_node->next_block) {
-        split(a, c, r, e.second);
-    }
-    // move all elements from transitions_into_q into new blocks
-    std::vector<int> altered;
-    std::unordered_map<int, std::vector<Block *>::iterator> visited_blocks;
-    for (std::pair<const int, int> &state_id_and_count : cll_node->transitions_into_q) {
-        int state_id = state_id_and_count.first;
-        int block_id = a->m_states[state_id]->r_block->id;
-
-        if (!visited_blocks.count(block_id)) {
-            altered.push_back(r->size());
-            r->push_back(new Block(r->size()));
-            visited_blocks[block_id] = r->end() - 1;
+        // use b = S_i\B_i and not_b = B_i for splitn
+        void split(Automaton *a, Relation *p, Block b = -1, Block not_b = -1) {
+            ObsQ obsq(a, p, b, not_b);
+            for (std::pair<const std::string, ObsQ::ObsQNode *> &e : obsq.f_to_qnodes) {
+                split_helper(e.second);
+            }
+        }
+    
+    private:
+        void split_helper(ObsQ::ObsQNode *qnode) {
+            for (std::pair<const Block, ObsQ::ObsQNode *> &e : qnode->next_block) {
+                split_helper(e.second);
+            }
+            bs->r_split(separate(qnode->transitions_into));
         }
 
-        // detach state from old Block, attach to new
-        State *s = a->m_states[state_id];
-        s->r_block->states.erase(state_id);
-        if (s->r_block->states.empty()) { // all elements now moved out
-            // swap newly added block with empty block
-            altered.back() = s->r_block->id;
-            r->back()->id = s->r_block->id;
-            r->at(s->r_block->id) = r->back();
-            r->erase(r->end() - 1);
-        }
-        s->r_block = *(visited_blocks[block_id]);
-        (*(visited_blocks[block_id]))->states[state_id] = s;
-    }
-    c->split(r, &altered);
-}
+        BlockSelector *bs;
+};
 
-void summarize(std::vector<Block *> &relation) {
-    for (Block *b : relation) {
-        std::cout << "[ ";
-        for (std::pair<const int, State *> &e : b->states) {
-            std::cout << e.second->id << " ";
-        }
-        std::cout << "]" << std::endl;
-    }
+void summarize(int iteration, Relation *p, Relation *r) {
+    std::cout << std::endl << "Iteration " << iteration << ":" << std::endl;
+    std::cout << "P:" << std::endl;
+    p->summarize();
+    std::cout << "R:" << std::endl;
+    r->summarize();
 }
 
 // output: (Automaton, block_id -> [element ids in block])
 // std::pair<Automaton *, std::unordered_map<int, std::vector<int>>> back_minim(Automaton *a) {
 Automaton *back_minim(Automaton *a) {
-    std::vector<Block *> p, r;
+    BlockSelector bs;
+    PRelation p(&bs, a->n_states);
+    RRelation r(&bs, a->n_states);
+    r.split(a, &p);
 
-    // P_0 := QxQ, R_0 := QxQ
-    p.push_back(new Block(0));
-    r.push_back(new Block(0));
-    for (std::pair<const int, State *> &e : a->m_states) {
-        State *s = e.second;
-        s->p_block = p[0];
-        s->r_block = r[0];
-        p[0]->states[s->id] = s;
-        r[0]->states[s->id] = s;
-    }
+    summarize(0, &p, &r);
 
-    Composite c(&p, &r);
+    std::pair<Block, Block> si_bi;
+    for (int i = 0; (si_bi = bs.select(&p, &r)).first != -1; ++i) {
+        p.cut(&r, si_bi.second);
+        r.split(a, &p, i+1);
+        r.split(a, &p, si_bi.first, i+1);
 
-    // R_0 := R_0 \ split(L_0)
-    ObsQ r0_obsq(a, &r, nullptr);
-    for (std::pair<const std::string, ObsQ::CountLL *> &e : r0_obsq.m_f_to_countll) {
-        split(a, &c, &r, e.second);
-    }
-
-    std::cout << "P0:" << std::endl;
-    summarize(p);
-    std::cout << "R0:" << std::endl;
-    summarize(r);
-
-    int i = 1; 
-    std::pair<Block *, Block *> si_bi = c.select();
-    while (si_bi.first != nullptr && si_bi.second != nullptr) {
-        cut(&c, &p, si_bi.second);
-        si_bi.second = p.back();
-        // R_i \ split(L_{i+1}(B_i))
-        ObsQ ri_obsq_bi(a, &r, si_bi.second);
-        for (std::pair<const std::string, ObsQ::CountLL *> &e : ri_obsq_bi.m_f_to_countll) {
-            split(a, &c, &r, e.second);
-        }
-
-        
-        std::cout << "P" << i << ":" << std::endl;
-        summarize(p);
-        /*
-        std::cout << "R" << i-1 << " \\ split:" << std::endl;
-        summarize(r);
-        */
-        
-
-        // std::cout << si_bi.first << " " << si_bi.second << std::endl;
-        ObsQ ri_obsq_si_bi(a, &r, si_bi.first, si_bi.second);
-        for (std::pair<const std::string, ObsQ::CountLL *> &e : ri_obsq_si_bi.m_f_to_countll) {
-            split(a, &c, &r, e.second);
-        }
-
-        std::cout << "R" << i << ":" << std::endl;
-        summarize(r);
-
-        si_bi = c.select();
-
-        i++;
+        summarize(i+1, &p, &r);
     }
 
     return a;
@@ -358,8 +348,7 @@ std::pair<Automaton *, std::unordered_map<int, std::vector<int>>> forward_minim(
 
 int main()
 {
-    freopen("test.out", "w", stdout);
-
+    // freopen("test.out", "w", stdout);
 
     Automaton automaton;
 
@@ -394,8 +383,6 @@ int main()
             stk.pop();
 
         automaton.add(stk.top());
-
-        // break;
     }
 
     automaton.summarize();

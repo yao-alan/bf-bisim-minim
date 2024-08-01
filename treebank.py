@@ -17,10 +17,10 @@ for fid in treebank.fileids():
         n_subtrees = tree.subtrees(lambda t: t.height() == 5)
         for j, st in enumerate(n_subtrees):
 
-            if k == 100:
+            if k == 10:
                 exit()
 
-            f = open(f"./other_tests_2/{fid.split('.')[0]}-sentence-{i}-subtree-{j}", 'w')
+            f = open(f"./other_tests_3/{fid.split('.')[0]}-sentence-{i}-subtree-{j}", 'w')
 
             stk = deque()
             stk.append((st, 0))
